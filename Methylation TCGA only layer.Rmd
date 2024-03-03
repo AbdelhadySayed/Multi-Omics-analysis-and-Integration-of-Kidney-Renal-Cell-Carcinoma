@@ -1,0 +1,1393 @@
+
+###########################################
+#  - Multi Omics Course                   # 
+#  - Methylation profile of kidney cancer #
+#  
+###########################################
+#version 4.2.0 (2022-04-22 ucrt)
+#Platform: x86_64-w64-mingw32/x64 (64-bit)
+#Running under: Windows 10 x64 (build 19044)
+
+#Matrix products: default
+
+#locale:
+#[1] LC_COLLATE=English_United States.utf8  LC_CTYPE=English_United States.utf8    LC_MONETARY=English_United States.utf8
+#[4] LC_NUMERIC=C                           LC_TIME=English_United States.utf8    
+
+#attached base packages:
+#[1] stats     graphics  grDevices utils     datasets  methods   base     
+
+#loaded via a namespace (and not attached):
+# [1] compiler_4.2.0      tools_4.2.0         Biobase_2.56.0      BiocGenerics_0.42.0
+
+##############Workflow Steps#####
+Part1: Manipulation with CpGs:
+1.Download Methylation data from TCGA.
+2.Data Reprocessing:
+    * A.- remove probes with NA    
+    * B.- remove probes that match to chromosome  X and Y (Not applay)
+    * C.- remove SNPs overlapped probe
+    * D .- SNPs with maf <= 0.05
+    * E.- Removing probes that have been demonstrated to map to multiple places in the genome.
+3.Normalization.
+4.Scaling.
+Part2: Exploratory data analysis by:
+     * A.-  Histogram  
+     * B.- Density plot
+     * C.- PCA
+     * D .- Bar plot
+     
+Part3: Downstream analysis:
+Determine Differently methylated regions (DMR) by limma.
+Volcano plot.
+Heat map of Differtionally methylated CpGs.
+PCA 2D & 3D.
+Part4: Relation to Gene.
+Part 5: Testing for differences between group variances.
+
+Part6: Integration with gene expression matrix.
+     * A.- preparing methylation data for cis-regulatory analysis  
+     * B.- Trans regulatory analysis.
+
+```{r}
+###########Load Needed Libraries:
+library(TCGAbiolinks)
+library(SummarizedExperiment)
+library(dplyr)
+library(DT)
+library("limma")
+library("edgeR")
+library("glmnet")
+library("factoextra")
+library("FactoMineR")
+library(reshape2)
+library(ggplot2)
+library(EnhancedVolcano)
+```
+
+```{r}
+
+
+
+Kidney_methylation <- GDCquery(project = "TCGA-KIRC",
+                         data.category = "DNA Methylation",
+                         data.type = "Methylation Beta Value",
+                         platform = "Illumina Human Methylation 450")
+```
+
+
+```{r}
+setwd("D:\\MODA Course\\GDCdata\\TCGA-KIRC")
+GDCdownload(Kidney_methylation)
+```
+
+
+```{r}
+setwd("D:\\MODA Course\\GDCdata\\TCGA-KIRC")
+Kidney_data_meth=GDCprepare(Kidney_methylation)
+```
+
+
+#########Download Methylation matrix of KIRC:
+```{r}
+Methylation=as.data.frame(assay(Kidney_data_meth))
+####Removal of Additional - New Primary samples from  methylation matrix
+Methylation=Methylation[,colnames(Methylation)!="TCGA-DV-A4W0-05A-11D-A264-05"]
+```
+
+
+
+#################Downloading clinical data of KIRC Methylation:
+```{r}
+clinical_kirc_methylation=as.data.frame(colData(Kidney_data_meth))
+####Removal of Additional - New Primary samples from clinical kirc methylation
+table(clinical_kirc_methylation$sample_type)
+removed_sample=clinical_kirc_methylation[clinical_kirc_methylation$sample_type=="Additional - New Primary",]
+clinical_kirc_methylation=clinical_kirc_methylation[clinical_kirc_methylation$sample_type!="Additional - New Primary",]
+```
+#################################################################################
+2)Data Reprocessing: NA values and same beta-values Deletion
+     
+    * A.- remove probes with NA    
+    * B.- remove probes that match to chromosome  X and Y (Not applay)
+    * C.- remove SNPs overlapped probe
+    * D .- SNPs with maf <= 0.05
+    * E.- Removing probes that have been demonstrated to map to multiple places in the genome.
+################################################################################
+```{r}
+
+## A.- remove probes with NA
+probe.na <- rowSums(is.na(Methylation ))
+
+table(probe.na == 0)
+
+```
+
+
+```{r}
+Accepted_probes=probe.na[probe.na == 0]
+```
+
+
+```{r}
+Mehylation_1=Methylation[rownames(Methylation)%in%names(Accepted_probes),]
+M1=Methylation[names(Accepted_probes),]
+```
+
+
+```{r}
+######A.1 Download annotation file
+install.packages('base64')
+ #get the 450k annotation data
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install("IlluminaHumanMethylation450kanno.ilmn12.hg19")
+library("IlluminaHumanMethylation450kanno.ilmn12.hg19")
+ann450k <- getAnnotation(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+```
+
+
+
+
+```{r}
+########A.2 Save Annotation file 
+anna50_df=as.data.frame(ann450k)
+
+#write.csv(anna50_df,file="D:\\MODA Course\\Annotation_df.csv")
+
+```
+
+
+```{r}
+## B.  remove probes that match to chromosome  X and Y 
+Unaccebted_probes <- (row.names(M1) %in% ann450k$Name[ann450k$chr %in% c("chrX","chrY")])
+table(Unaccebted_probes)
+M1  <- M1 [!Unaccebted_probes, ]
+rm(Unaccebted_probes) 
+```
+
+
+```{r}
+## C. remove SNPs overlapped probe
+
+##########Remain non SNP probes:
+Non_SNP_probes=anna50_df[is.na(anna50_df$Probe_rs),"Name"]
+
+table(ann450k$Probe_rs)
+table(is.na(ann450k$Probe_rs))
+# probes with snp
+
+snp.probe <- ann450k[!is.na(ann450k$Probe_rs), ]
+```
+
+
+
+```{r}
+##D.Remian SNP with maf <=0.05
+Accepted_maf=anna50_df[anna50_df$Probe_maf<=0.05,"Name"]
+
+
+```
+
+
+```{r}
+##### Methylation data frame:
+M_filtered_df=M1[rownames(M1)%in%c(Non_SNP_probes,Accepted_maf),]
+```
+
+```{r}
+############E) ## Removing probes that have been demonstrated to map to multiple places in the genome.
+# list adapted from https://www.tandfonline.com/doi/full/10.4161/epi.23470
+# exclude cross reactive probes 
+xReactiveProbes <- read.csv("D:\\MODA Course\\MODA project\\48639-non-specific-probes-Illumina450k.csv", stringsAsFactors=FALSE)
+                                       
+```
+
+
+```{r}
+crs.reac <- as.vector((xReactiveProbes$TargetID[-1]))
+length(crs.reac)
+```
+###########Remove probes that matched with multiple places on genome
+
+```{r}
+M_filtered_crs_reac=(subset(M_filtered_df, !(rownames(M_filtered_df) %in% crs.reac)))
+```
+
+###############Normalization################################
+```{r}
+
+## converting beta values to m_values by the formula:m = log2(beta/1-beta)
+
+mval <- t(apply(M_filtered_crs_reac, 1, function(x) log2(x/(1-x))))
+```
+
+
+```{r}
+############### Save beta value data frame and mvalue data frame 
+bval_matrix <- data.matrix(M_filtered_crs_reac, rownames.force = NA)
+mval_matrix <- data.matrix(mval, rownames.force = NA)
+dim(mval_matrix)
+```
+
+##########################Scaling#########################
+```{r}
+Methylation_normalized_t=as.data.frame(t(mval_matrix))
+scaled_methylated_CpGs=scale(Methylation_normalized_t)
+scaled_methylated_CpGs=as.data.frame(t(scaled_methylated_CpGs))
+```
+
+
+########## Part2: Exploratory Data Analysis#########################
+
+```{r}
+########Histogram
+par(mfrow=c(1,3))
+
+hist(bval_matrix, breaks = 50, main = "Histogram of row data" )
+
+hist(mval_matrix, breaks = 50,main = "Histogram of mvalue data")
+
+hist(t(scaled_methylated_CpGs), breaks = 50,main = "Histogram of scaled data")
+```
+```{r}
+########Density plot of Normalized data
+densityPlot(bval_matrix,legend = TRUE, main = "KIRC beta-values", sampGroups = clinical_kirc_methylation$sample_type, pal = c("Brown", "Blue"))
+```
+
+
+```{r}
+########Density plot of scaled data
+
+densityPlot(t(scaled_methylated_CpGs),legend = TRUE, main = "KIRC scaled data", sampGroups = clinical_kirc_methylation$sample_type, pal = c("Brown", "Blue"))
+```
+
+```{r}
+###########PCA
+pal <- c("#AB0302", "#108372")
+plotMDS(bval_matrix, top=5000, 
+        pch = 19, #Forma 
+        gene.selection="common", 
+        col=pal[factor(clinical_kirc_methylation$sample_type)])
+legend("topright", legend=levels(factor(clinical_kirc_methylation$sample_type)), text.col=pal, bg="white", cex=1)
+```
+
+
+```{r}
+#########Check Methylation mean
+bval_df=as.data.frame(bval_matrix)
+df <- data.frame(
+  "Sample.mean" = colMeans((bval_matrix), na.rm = TRUE),
+  "groups" =clinical_kirc_methylation$sample_type)
+
+
+library(ggpubr)
+ggplot(df,aes(x=groups,y=Sample.mean,col=groups))+geom_boxplot()
+```
+
+##########Part3: Determination of Differentially methylated region:
+
+
+```{r}
+
+anna50_df$Gene=sapply(sapply(strsplit(anna50_df$UCSC_RefGene_Name, ";"), unique), function(x) ifelse(length(x)>1, paste(x[1], x[2], sep = "_"), x[1]))
+
+```
+
+
+```{r}
+library(limma)
+
+all(rownames(clinical_kirc_methylation$barcode) == colnames(mval_matrix))
+
+Group_meth <- factor(clinical_kirc_methylation$sample_type, levels=c("Solid Tissue Normal","Primary Tumor"))
+table(clinical_kirc_methylation$sample_type)
+design <- model.matrix(~0+Group_meth)
+colnames(design) <- c("Normal","Cancer")
+mval_matrix=mval_matrix[,colnames(mval_matrix)!=removed_sample$barcode]
+fit <- lmFit(mval_matrix, design)
+cont.matrix <- makeContrasts(CancervsNormal=Cancer-Normal, levels=design)
+fit2 <- contrasts.fit(fit, cont.matrix)
+e_fit <- eBayes(fit2)
+summary(decideTests(e_fit))
+# get the table of results 
+ann450kSub <- ann450k[match(rownames(mval_matrix),(ann450k$Name)),c(1:4,11:19,24:ncol(ann450k))]
+ann450kSub=as.data.frame(ann450kSub)
+DMS=topTable(e_fit, adjust.method='fdr', number=999999999,p.value=1,coef = 1, genelist=ann450kSub)
+
+```
+
+
+```{r}
+colnames(DMS)
+DMS_filtered=DMS%>%filter(abs(logFC)>1,adj.P.Val<0.05)
+
+
+```
+
+
+```{r}
+DMS$Gene <-sapply(sapply(strsplit(DMS$UCSC_RefGene_Name, ";"), unique), function(x) ifelse(length(x)>1, paste(x[1], x[2], sep = "_"), x[1])) 
+DMS$CpgGene <- paste(DMS$Row.names, DMS$Gene)
+
+```
+##############Extraction of hyper-methylated & hypo-methylated CpG:
+```{r}
+DMS_filtered$Gene=sapply(sapply(strsplit(DMS_filtered$UCSC_RefGene_Name, ";"), unique), function(x) ifelse(length(x)>1, paste(x[1], x[2], sep = "_"), x[1])) 
+DMS_filtered$CpgGene <- paste(DMS_filtered$Row.names, DMS_filtered$Gene)
+```
+
+
+```{r}
+#############Hyper_methylated & hypo_methylated:"logFC"                   
+
+DMS_filtered$methylation_level="Up-regulation"
+DMS_filtered[DMS_filtered$logFC<0 & DMS_filtered$adj.P.Val<0.05,]$methylation_level="Down_regulated"
+```
+
+```{r}
+#####retrieve DEMS in the form of cpg and scale the data:
+names=rownames(DMS_filtered)
+DEMS_data=mval_matrix[names,]
+DEMS_data=as.data.frame(DEMS_data)
+#############Scaling the data:
+DEMS_transposed=as.data.frame(t(DEMS_data))
+DEMS_all_scaled=scale(DEMS_transposed)
+DEMS_cpg_final=as.data.frame(t(DEMS_all_scaled))
+##############Save:
+#rite.csv(DEMS_cpg_final,"D:\\MODA Course\\scaled_meth_cpgs.csv")
+```
+
+
+```{r}
+######Volcano plot:
+
+EnhancedVolcano(DMS_filtered,
+    lab = DMS_filtered$Gene,
+     pCutoff = 10e-3,
+    FCcutoff = 2,
+    x = 'logFC',
+    y = 'adj.P.Val', title = "Cancer vs Normal", legendLabels = c("NS", expression(Log[2] ~ FC), "adj.P.Val", expression(adj.P.Val ~ and
+                                                                                       ~ log[2] ~ FC)))
+                 
+```
+
+
+```{r pressure, echo=FALSE}
+######Volcano plot in R using ggplot:
+ggplot(DMS_filtered,aes(x=logFC,y=-10*log10(adj.P.Val),color=DMS_filtered$methylation_level))+geom_point()+scale_color_manual(values=c("blue", "red"))+theme(  plot.title = element_text(hjust = 0.5,size=15,face = "bold"),
+        axis.text.x = element_text( size = 15, angle = 45, hjust = .5, vjust = 0.5, face = "plain"),
+        axis.text.y = element_text( size = 15, angle = 0, hjust = 1, vjust = 0, face = "plain"),
+        axis.title.x = element_text( size = 15, angle = 0, hjust = .5, vjust = 0, face = "bold"),
+        axis.title.y = element_text( size = 15, angle = 90, hjust = .5, vjust = .5, face = "bold"), #legend.title=element_text(size=20),
+        legend.title=element_blank(), # remove legend title name
+        legend.text = element_text(size=15,face="plain"),
+        strip.text = element_text(size = 15,face="plain") ,
+        legend.position="right",     # for transparent background
+        panel.background = element_rect(fill = "transparent"), # bg of the panel
+        plot.background = element_rect(fill = "transparent", color = NA), # bg of the plot
+        panel.grid.major = element_blank(), # get rid of major grid
+        panel.grid.minor = element_blank(), # get rid of minor grid
+        legend.background = element_rect(fill = "transparent"), # get rid of legend bg
+        legend.box.background = element_rect(fill = "transparent"), # get rid of legend panel bg
+        axis.line = element_line(colour = "black"))+geom_hline(yintercept = -10*log10(0.05),linetype = "dashed") # adding a black line for x and y axis)
+```
+
+
+```{r}
+DMS_filtered2=DMS%>%filter(abs(logFC)>1,adj.P.Val<0.05)
+```
+
+
+```{r}
+res.dems2=DMS_filtered2[order(DMS_filtered2$adj.P.Val), ]
+Top__DEMS=rownames(res.dems2)
+
+
+scaled_DEMS2=scaled_methylated_CpGs[Top__DEMS,]
+```
+
+
+
+
+
+
+############Complex heat map:
+```{r}
+##### You should scale data :
+
+Top_100_DEMS=head(scaled_DEMS2,100)
+#scaled_Methylation=as.data.frame(scale(t(Top_100_DEMS)))
+Heatmap_DEMS=as.data.frame(t(Top_100_DEMS))
+
+```
+
+
+```{r, echo=FALSE, out.width='100%}
+
+#Create the heatmap annotation
+
+
+library(ComplexHeatmap)
+col = list(Sample.Type= c("Primary Tumor" = "green" ,  "Solid Tissue Normal" = "red"))
+ha <- HeatmapAnnotation( Sample.Type=clinical_kirc_methylation$sample_type)
+Heatmap(as.matrix(Top_100_DEMS), name = "Top highly CPGs", top_annotation = ha,row_names_gp = gpar(fontsize = 5),column_names_gp = gpar(fontsize = 4))
+```
+
+```{r}
+library("FactoMineR")
+library("factoextra")
+
+```
+
+
+```{r}
+res.pca2 <- PCA(t(scaled_DEMS2), graph = FALSE)
+res.pca2
+```
+
+
+```{r}
+fviz_eig(res.pca2, addlabels = TRUE, ylim = c(0, 50))
+```
+
+
+```{r}
+var <- get_pca_var(res.pca2)
+var
+```
+
+
+```{r}
+library("corrplot")
+
+```
+
+
+```{r}
+
+var$contrib[1:20,]
+corrplot(var$contrib[1:15,], is.corr=FALSE)
+```
+
+
+```{r}
+grp2 <- as.factor(Merged_methylation_clinical$sample_type)
+length(grp2)
+           
+```
+
+
+```{r}
+
+fviz_pca_ind(res.pca2,
+              geom.ind = "point", # show points only (nbut not "text")
+              col.ind  = grp2,# color by groups
+              palette = c("#00AFBB", "#E7B800"),
+             # Concentration ellipses
+             legend.title = "Groups",addEllipses = TRUE, # Concentration ellipses
+             ellipse.type = "confidence",
+             
+             repel = TRUE
+             )
+             
+             
+```
+
+```{r}
+res.pca3 <- prcomp(t(scaled_DEMS2), scale = TRUE)
+df_pca3=as.data.frame(res.pca3$x)
+```
+
+
+```{r}
+#####PCA by using ggplot:
+ggplot(df_pca3,aes(PC1,PC2,color=Merged_methylation_clinical$sample_type,shape=Merged_methylation_clinical$gender.y))+geom_point()+labs(color='')+theme(  plot.title = element_text(hjust = 0.5,size=15,face = "bold"),
+        axis.text.x = element_text( size = 15, angle = 45, hjust = .5, vjust = 0.5, face = "plain"),
+        axis.text.y = element_text( size = 15, angle = 0, hjust = 1, vjust = 0, face = "plain"),
+        axis.title.x = element_text( size = 15, angle = 0, hjust = .5, vjust = 0, face = "bold"),
+        axis.title.y = element_text( size = 15, angle = 90, hjust = .5, vjust = .5, face = "bold"),
+        #legend.title=element_text(size=20),
+        legend.title=element_blank(), # remove legend title name
+        legend.text = element_text(size=15,face="plain"),
+        strip.text = element_text(size = 15,face="plain") ,
+        legend.position="right",     # for transparent background
+        panel.background = element_rect(fill = "transparent"), # bg of the panel
+        plot.background = element_rect(fill = "transparent", color = NA), # bg of the plot
+        panel.grid.major = element_blank(), # get rid of major grid
+        panel.grid.minor = element_blank(), # get rid of minor grid
+        legend.background = element_rect(fill = "transparent"), # get rid of legend bg
+        legend.box.background = element_rect(fill = "transparent"), # get rid of legend panel bg
+        axis.line = element_line(colour = "black") # adding a black line for x and y axis
+)+xlab(paste0("PC1 ",round(res.pca3$sdev[1],1),"%"))+ylab(paste0("PC2 ",round(res.pca3$sdev[2],1),"%"))
+```
+
+###############3D plot:
+```{r}
+library(rgl)
+pca_processed <- prcomp(t(scaled_DEMS2), 
+                  scale=TRUE)
+summary(pca_processed)
+scores = as.data.frame(pca_processed$x)
+#############################################
+
+########################################
+######plot3d:
+
+plot3d(scores[,1:3], 
+       size=5,
+       col =seq(nrow(scores)))
+
+text3d(scores[,1:3],
+       texts=c(rownames(scores)), 
+       cex= 0.7, pos=3)
+get_colors <- function(groups, group.col = palette()){
+  groups <- as.factor(groups)
+  ngrps <- length(levels(groups))
+  if(ngrps > length(group.col)) 
+    group.col <- rep(group.col, ngrps)
+  color <- group.col[as.numeric(groups)]
+  names(color) <- as.vector(groups)
+  return(color)
+}
+x=scores[,1]
+y=scores[,2]
+z=scores[,3]
+plot3d(x,y,z, col=get_colors(Merged_methylation_clinical$sample_type))
+```
+
+ RELATION to GENE 
+
+---------  (DMC) CpGs POSITION / RELATION to GENE  ----------- 
+
+    - Regulatory (TSS200, TSS1500, 1StExon, 5'UTR)
+    - Body Regions
+    - 3'UTR Regions
+
+
+```{r}
+
+
+#1.- UCSC Gene Group annotation modification (DMCs group and All CpG as control):
+
+
+DMCs_up=DMS_filtered%>%filter(methylation_level=="Up-regulation")
+DMCs_down=DMS_filtered%>%filter(methylation_level=="Down_regulated")
+DMCs_up$Gene_Group <- sapply(sapply(strsplit(DMCs_up$UCSC_RefGene_Group, ";"), unique), function(x)x[1])
+DMCs_down$Gene_Group <- sapply(sapply(strsplit(DMCs_down$UCSC_RefGene_Group, ";"), unique), function(x)x[1])
+DMS$Gene_Group<- sapply(sapply(strsplit(DMS$UCSC_RefGene_Group, ";"), unique), function(x)x[1])
+
+
+
+```
+
+
+2.- Ratio calculation : CpG position / ralation to Gene
+```{r pressure, echo=FALSE}
+Relation_DMCs_up <- DMCs_up %>%
+  group_by(Gene_Group) %>%
+  summarise(counts = n())
+
+#Relation_DMCs$x <- rep("Relation to nearest gene", nrow(Relation_DMCs))
+#Relation_DMCs_up$Gene_Group  <- factor(Relation_DMCs$Gene_Group, levels = c("TSS200", "TSS1500", "1stExon", "5'UTR", "3'UTR", "Body"))
+#########Remove NA:
+Relation_DMCs_up_filtered=Relation_DMCs_up%>%filter(Gene_Group!="NA")
+
+ggplot(Relation_DMCs_up_filtered, aes(fill=Gene_Group, y=counts, x = "Relation to nearest gene")) + 
+    geom_bar(position="fill", stat="identity") + 
+  theme_classic()+
+  guides(fill=guide_legend(title="Genomic region"))
+```
+
+
+```{r pressure, echo=FALSE}
+Relation_DMCs_Down <- DMCs_down %>%
+  group_by(Gene_Group) %>%
+  summarise(counts = n())
+Relation_DMCs_Down_filtered=Relation_DMCs_Down%>%filter(Gene_Group!="NA")
+
+ggplot(Relation_DMCs_Down_filtered, aes(fill=Gene_Group, y=counts, x = "Relation to nearest gene")) + 
+    geom_bar(position="fill", stat="identity") + 
+  theme_classic()+
+  guides(fill=guide_legend(title="Genomic region"))
+```
+
+
+```{r pressure, echo=FALSE}
+All_Methylation <- DMS %>%
+  group_by(Gene_Group) %>%
+  summarise(counts = n())
+All_Methylation_filtered=All_Methylation%>%filter(Gene_Group!="NA")
+
+ggplot(All_Methylation_filtered, aes(fill=Gene_Group, y=counts, x = "Relation to nearest gene")) + 
+    geom_bar(position="fill", stat="identity") + 
+  theme_classic()+
+  guides(fill=guide_legend(title="Genomic region"))
+```
+
+
+```{r pressure, echo=FALSE}
+#3.- Class varaiable Cration: All, Hyper, Hypo
+All_Methylation$class <- rep("All", nrow(All_Methylation))
+Relation_DMCs_up$class <- rep("Hyper", nrow(Relation_DMCs_up))
+Relation_DMCs_Down$class <- rep("Hypo", nrow(Relation_DMCs_Down))
+
+#4.- % calculation
+All_Methylation$perc <- 100*(All_Methylation$counts/sum(All_Methylation$counts))
+Relation_DMCs_up$perc <- 100*(Relation_DMCs_up$counts/sum(Relation_DMCs_up$counts))
+Relation_DMCs_Down$perc <- 100*(Relation_DMCs_Down$counts/sum(Relation_DMCs_Down$counts))
+
+#5.- Combine all data frame
+Gene_group_df <- rbind(All_Methylation, Relation_DMCs_up, Relation_DMCs_Down)
+
+#Change NA to IGR. Intergenic Gene Regions
+Gene_group_df$Gene_Group[is.na(Gene_group_df$Gene_Group)] <- "IGR"
+Gene_group_df
+
+```
+
+
+```{r pressure, echo=FALSE}
+Gene_group_df$p1 <- with(Gene_group_df, paste(formatC(perc, digits=2
+              , format="fg"),"%",sep=""))
+```
+
+
+```{r pressure, echo=FALSE}
+ggplot(Gene_group_df, 
+       aes(fill=Gene_Group, y=perc, x = class)) + 
+    geom_bar(position="fill", stat="identity")+theme_classic()+
+  
+   
+  
+  #% definition:
+  scale_y_continuous(labels = scales:: percent_format(accuracy = 1))+
+  
+  labs(x = "", y = "% of CpG positions / Relative to Gene")+
+  geom_text(aes(label=p1),position = position_fill(vjust = 0.5))
+
+```
+
+we may be interested in testing for differences between group variances. This could be quite helpful for feature selection in ML-based projects. In this situation, you may prefer to select variables that show great differences between groups.
+
+```{r pressure, echo=FALSE}
+#if (!require("BiocManager", quietly = TRUE))
+    #install.packages("BiocManager")
+
+#BiocManager::install("missMethyl")
+library(missMethyl)
+
+#__________________________Differential variability_________________#
+fitvar <- varFit(mval, design = design,coef=c(1,2))
+
+design
+# Summary of differential variability
+summary(decideTests(fitvar))
+
+topDV <- topVar(fitvar)
+# Top 10 differentially variable CpGs between old vs. newborns
+topDV
+
+
+## if you got this error: Error in plot.new() : figure margins too large 
+#Do the following and try again:
+#graphics.off()
+#par("mar")
+#par(mar=c(1,1,1,1))
+
+```
+
+
+```{r pressure, echo=FALSE}
+# visualization
+# get beta values for ageing data
+topDV=topDV[order(topDV$LogVarRatio,decreasing = TRUE),]
+
+cpgsDV <- rownames(topDV)
+par(mfrow=c(2,2))
+for(i in 1:10){
+stripchart(bval_matrix[rownames(bval_matrix)==cpgsDV[i],]~design,
+group.names=c("Cancer","Normal"),pch=16,cex=1.5,col=c(4,2),ylab="Beta values",title(cpgsDV[i],cex.main=1.5)
+#vertical=TRUE,cex.axis=1.5,cex.lab=1.5)
+
+)}
+par(mfrow=c(2,2))
+
+sapply(rownames(topDV)[6:10], function(cpg){
+ plotCpg(M_filtered_crs_reac, cpg=cpg, pheno= Merged_methylation_clinical$sample_type, 
+          ylab = "Beta values")
+})
+
+
+```
+
+
+`#______________preparing methylation data for cis-regulatory analysis____________#
+```{r}##############Downloading RNA seq data of Kidney carcinoma from TCGA
+
+```{r}
+query_kidney<- GDCquery(project = "TCGA-KIRC",
+                         data.category = "Transcriptome Profiling",
+                         data.type = "Gene Expression Quantification",
+                         workflow.type = "STAR - Counts")
+GDCdownload(query_kidney)
+```
+
+```{r}
+Kidney_data=GDCprepare(query_kidney)
+```
+#########Downlaod clinical data of KIRC project
+
+```{r}
+clinical_kirc_expression=as.data.frame(colData(Kidney_data))
+########Remove Additional_primary tumor
+removed_sample=clinical_kirc_expression[clinical_kirc_expression$sample_type=="Additional - New Primary",]
+clinical_kirc_expression=clinical_kirc_expression[clinical_kirc_expression$sample_type!="Additional - New Primary",]
+```
+
+```{r}
+Expression=as.data.frame(assay(Kidney_data))
+Expression=Expression[,colnames(Expression)!=removed_sample$barcode]
+```
+
+```{r}
+genes=as.data.frame(rowData(Kidney_data))
+####Extract only protein coding genes:
+genes_protein_coding=genes%>%filter(gene_type=="protein_coding")
+#Gene_annotation=write.csv(genes_protein_coding,"D:\\MODA Course\\Gene_annotation.csv")
+
+##########Retrieve protein_coding genes from Expression _matrix:
+genes_id_common=genes_protein_coding$gene_id
+
+matched_genes_id=match(genes_protein_coding$gene_id,rownames(Expression))
+Expression_subseted=Expression[matched_genes_id,]
+```
+
+```{r}
+
+
+#Gene_annotation=write.csv("")
+dge = DGEList( counts= Expression_subseted,samples= clinical_kirc_expression, genes= genes_protein_coding
+
+  #group = BRCA_Rnaseq_STAR$sample_type,
+ )
+  
+
+#dim(dge)
+
+```
+
+
+```{r}
+#______________________________ Quality Control ______________________________#
+
+# Quality control -> unfiltered distribution
+library(RColorBrewer)
+log_cpm1 <- cpm(dge, log=TRUE)    
+L <- mean(dge$samples$lib.size) * 1e-6
+M <- median(dge$samples$lib.size) * 1e-6
+
+lcpm.cutoff <- log2(10/M + 2/L)
+nsamples <- ncol(dge)
+col <- brewer.pal(nsamples, "Paired")
+
+
+
+par(mfrow=c(1,2))
+plot(density(log_cpm1[,1]), col=col[1], lwd=2, ylim=c(0,0.26), las=2, main="", xlab="")
+title(main="A. Raw data", xlab="Log-cpm")
+abline(v=lcpm.cutoff, lty=3)
+for (i in 2:nsamples){
+den <- density(log_cpm1[,i])
+lines(den$x, den$y, col=col[i], lwd=2)
+}
+
+
+```
+
+
+```{r}
+#______________________________ Filtering ________________________________________#
+
+#Genes without expression or without sufficient representation have been eliminated, in order to reduce the problems associated with multiple tests.
+
+# Is required at least 10-15 counts / gene.
+# Automatic filter by filterByExpr function (edgeR package) 
+
+
+keep <- filterByExpr (dge, min.count = 10)# defining which genes to keep
+dge_filt = dge[keep,,keep.lib.sizes=FALSE] # filtering the dge object
+dim(dge_filt) 
+table(rowSums(dge_filt$counts==0)==533) #All false
+```
+
+
+```{r}
+#########Check distribution of data after filtering:
+log_cpm_F<- cpm(dge_filt, log=TRUE) 
+
+L_F <- mean(dge_filt$samples$lib.size) * 1e-6
+M_F <- median(dge_filt$samples$lib.size) * 1e-6
+
+lcpm.cutoff_F <- log2(10/M_F + 2/L_F)
+nsamples_F <- ncol(dge_filt)
+col <- brewer.pal(nsamples_F, "Paired")
+
+plot(density(log_cpm_F[,1]), col=col , lwd=2, ylim=c(0,0.2), las=2, main="", xlab="",  cex.lab = 2, cex.axis = 1.5  #mida y #mida x #Mida titol
+     )
+title(main="B. Filtered  data", xlab="Log-cpm", cex.lab = 2, cex.main = 3, family="Calibri Light")
+abline(v=lcpm.cutoff_F, lty=3)
+for (i in 2:nsamples_F){
+  den <- density(log_cpm_F[,i])
+  lines(den$x, den$y, col=col[i], lwd=2)
+}
+```
+
+```{r}
+#NORMALIZATION
+
+dge_norma = calcNormFactors(dge_filt,method="TMM")#TMM - trimmed mean of M-values
+dge_norma$samples$norm.factors
+#save normalized data
+RNA_normalized=as.data.frame(dge_norma)
+#range(RNA_normalized)
+```
+
+
+```{r}
+############Density plot after normalization
+log_cpm_n <- cpm(dge_norma, log=TRUE)    
+L_F <- mean(dge_norma$samples$lib.size) * 1e-6
+M_F <- median(dge_norma$samples$lib.size) * 1e-6
+
+lcpm.cutoff_F <- log2(10/M_F + 2/L_F)
+nsamples_F <- ncol(dge_norma)
+col <- brewer.pal(nsamples_F, "Paired")
+
+par(mfrow=c(1,2))
+
+
+plot(density(log_cpm_F[,1]), col=col, lwd=2, ylim=c(0,0.2), las=2, main="", xlab="",  cex.lab = 2, cex.axis = 1.5  #mida y #mida x #Mida titol
+     )
+title(main="B. Normalized  data", xlab="Log-cpm", cex.lab = 1, cex.main = 2, family="calibri")
+abline(v=lcpm.cutoff_F, lty=3)
+for (i in 2:nsamples_F){
+  den <- density(log_cpm_F[,i])
+  lines(den$x, den$y, col=col[i], lwd=2)
+}
+```
+```{r}
+########Box plot of normalized and non romalized data:
+
+par(mfrow=c(1,2))
+boxplot(log_cpm1[,1:10], las=2, col=col, main="")
+title(main="A. Example: Unnormalised data",ylab="Log-cpm")
+
+boxplot(log_cpm_n[,1:10], las=2, col=col, main="")
+title(main="B. Example: Normalised data",ylab="Log-cpm")
+```
+
+
+```{r}
+#############Check duplication:
+#RNA_normalized_f=RNA_normalized%>%tibble::rownames_to_column("gene_id")
+#######Match RNA_normalized with genes_protein_coding:
+
+
+RNA_merged=merge(RNA_normalized,genes_protein_coding)
+
+RNA_normalized_new=RNA_merged
+dim(RNA_normalized_new)
+        
+```
+
+
+```{r}
+############Check duplications:
+sum(duplicated(RNA_normalized_new$gene_id))
+```
+
+```{r}
+
+RNA_normalized_f=RNA_normalized_new%>%tibble::column_to_rownames("gene_name")
+RNA_KIRC=as.data.frame(t(RNA_normalized_f))
+RNA_KIRC=RNA_KIRC[-1 ,]
+RNA_KIRC=RNA_KIRC[-dim(RNA_KIRC)[1],]
+#rownames(RNA_KIRC)
+RNA_KIRC=RNA_KIRC[-c(1:9),]
+```
+
+
+```{r}
+##########Removal of genes with variance == zero or na:
+variance=apply(RNA_KIRC,2,var)
+unaccepted_variance=(variance==0|is.na(variance))
+RNA_KIRC=RNA_KIRC[,!unaccepted_variance]
+
+```
+
+
+```{r}
+##################Check Nans and missingness rate:
+Mis_rate=apply(is.na(RNA_KIRC),2,sum)/nrow(RNA_KIRC)*100
+
+```
+
+
+```{r}
+#####Histogram to check missingness rate:
+h2=hist(Mis_rate, breaks=10,main="MR", xlab="missinginess rate percentage",xlim=c(0,100))
+h2
+text(h2$mids,h2$counts,labels = h2$counts)
+
+```
+############## Limma:
+
+
+
+
+```{r}
+
+table(clinical_kirc_expression$sample_type)
+clinical_kirc_expression=clinical_kirc_expression%>%filter(sample_type%in%c("Solid Tissue Normal","Primary Tumor"))
+rownames(clinical_kirc_expression)=clinical_kirc_expression$barcode
+
+Group_exp <- factor(clinical_kirc_expression$sample_type, levels=c("Solid Tissue Normal","Primary Tumor"))
+table(clinical_kirc_expression$sample_type)
+design <- model.matrix(~0+Group_exp)
+colnames(design) <- c("Normal","Cancer")
+cont.matrix <- makeContrasts(Cancer-Normal, levels=design)
+#fit <- lmFit(mval_matrix, design)
+
+
+
+```
+
+
+
+```{r}
+#___________________________3.- VOOM __________________________________#
+
+#Moreover, to apply limma on RNA-seq, we need to convert the data to have a similar variance as arrays. This is done with the VOOM method.
+
+v = voom(dge_norma
+        ,design,plot=TRUE, save.plot = TRUE)#Convert data to have a similar variance as arrays
+```
+```{r}
+fit = lmFit(v, design)
+
+#beta parameters calculation
+cfit = contrasts.fit(fit,cont.matrix)
+
+#p-value calculation
+efit = eBayes(cfit) #eBayes produce complex object which holds a number of statistics that we can use to rank the differentially expressed genes.
+DEGS=topTable(efit,adjust.method='fdr', number=999999999,p.value=1,coef = 1)
+
+```
+
+
+```{r}
+DEGS_filtered=DEGS%>%filter(abs(logFC>1) & adj.P.Val<0.05) 
+```
+
+
+
+```{r}
+############Normalized RNA_data:
+Gene_annotation=v$genes
+Normalized_voom=as.data.frame(v$E)
+Normalized_voom=Normalized_voom%>%tibble::rownames_to_column("gene_id")
+Merged_normalized_voom=merge(Normalized_voom,Gene_annotation)
+Merged_normalized_voom=Merged_normalized_voom%>%tibble::column_to_rownames("gene_name")
+colnames(Merged_normalized_voom)
+Merged_normalized_voom=Merged_normalized_voom%>%select(-c(source,type,score,phase,gene_type,gene_type,hgnc_id,hgnc_id,gene_id,havana_gene,level)) ##############################################################################
+Merged_normalized_voom=as.data.frame(t(Merged_normalized_voom))
+scaled_RNA_data=scale(Merged_normalized_voom)
+scaled_RNA_data=as.data.frame(scaled_RNA_data)
+#########It will be used in integration with Methylation data:
+
+
+norm.count <- data.frame(v)
+norm.count <- norm.count[,-1]
+Gene_annotation=(norm.count)[1:9]
+norm_count2=norm.count[,-c(1:9)]
+#norm.count2=data.frame(v$E)
+norm.count <- t(apply(norm_count2,1, function(x){2^x}))
+norm.count=as.data.frame(norm.count)
+norm.count=cbind(norm.count,Gene_annotation)
+colnames(norm.count) <- chartr(".", "-", colnames(norm.count))
+
+```
+
+`#______________preparing methylation data for cis-regulatory analysis____________#
+
+
+```{r}
+###########Integration with Gene Expression Matrxi:
+
+
+# finding probes in promoter of genes
+table(anna50_df$Regulatory_Feature_Group) ## to find regulatory features of probes
+
+# selecting a subset of probes associated with promoters
+promoter.probe <- rownames(data.frame(ann450k))[data.frame(ann450k)$Regulatory_Feature_Group 
+                                                 %in% c("Promoter_Associated", "Promoter_Associated_Cell_type_specific")]
+```
+
+
+```{r pressure, echo=FALSE}
+Normal_id <- Merged_methylation_clinical$barcode[Merged_methylation_clinical$sample_type == "Solid Tissue Normal"]
+Cancer_id <-  Merged_methylation_clinical$barcode[Merged_methylation_clinical$sample_type == "Primary Tumor"]
+```
+
+
+```{r pressure, echo=FALSE}
+dbet <- data.frame (Normal.grade = rowMeans(bval_matrix[, Normal_id]),
+                    Cancer.grade = rowMeans(bval_matrix[, Cancer_id]))
+dbet$delta <- abs(dbet$Normal.grade - dbet$Cancer.grade)
+```
+
+
+```{r pressure, echo=FALSE}
+db.probe <- rownames(dbet)[dbet$delta > 0.2] # those with deltabeta > 0.2
+db.probe <- intersect(db.probe, promoter.probe) # those resided in promoter
+```
+# those genes flanked to promote probe
+
+```{r pressure, echo=FALSE}
+
+db.genes <- data.frame(ann450k)[rownames(data.frame(ann450k)) %in% db.probe, ]
+```
+
+
+```{r pressure, echo=FALSE}
+db.genes <- db.genes[, c("Name","UCSC_RefGene_Name")]
+db.genes <- tidyr::separate_rows(db.genes, Name, UCSC_RefGene_Name) # extending collapsed cells
+db.genes$comb <- paste(db.genes$Name,db.genes$UCSC_RefGene_Name) # remove duplicates
+db.genes <- db.genes[!duplicated(db.genes$comb), ]
+db.genes <- db.genes[, -3]
+```
+
+
+
+```{r}
+
+rownames(norm.count)=norm.count$gene_name
+cis.bval.mat <- as.data.frame(bval_matrix[, Cancer_id])
+Primary_tumor=rownames(Merged_methylation_clinical) [Merged_methylation_clinical$sample_type == "Primary Tumor"]
+Primary_tumor=as.numeric(Primary_tumor)
+
+cis.exp.mat <- norm.count[ ,Primary_tumor]
+
+```
+
+
+
+```{r pressure, echo=FALS}
+#making patient name similar
+colnames(cis.bval.mat) <- substr(colnames(cis.bval.mat),1,19)
+colnames(cis.exp.mat) <- substr(colnames(cis.exp.mat),1,19)
+intersected_smaples=intersect(colnames(cis.bval.mat),colnames(cis.exp.mat))
+cis.exp.mat <- cis.exp.mat[,intersected_smaples]
+rownames(cis.exp.mat)
+
+```
+
+
+```{r pressure, echo=FALSE}
+#editing expression matrix rowname
+
+df <- data.frame(name = row.names(cis.exp.mat)) # keeping rownames as a temporary data frame
+df <- data.frame(do.call('rbind', strsplit(as.character(df$name),'|',fixed=TRUE))) 
+rowName <- df$do.call..rbind...strsplit.as.character.df.name........fixed...TRUE..
+# find duplicates in rowName, if any
+table(duplicated(rowName))
+row.names(cis.exp.mat) <- rowName
+
+
+
+```
+
+
+
+```{r}
+#__________________correlation analysis__________________#
+#cis.reg = data.frame( gene=character(0), cpg=character(0), pval=numeric(0), cor=numeric(0))
+
+  intersected_genes=intersect(db.genes$UCSC_RefGene_Name,rownames(cis.exp.mat))
+  
+    
+  df1 <- as.data.frame(cis.exp.mat[intersected_genes, ])
+    Gene=as.data.frame(t(df1))
+    Gene=Gene%>%tibble::rownames_to_column("id")
+    Genes=melt( Gene)
+    
+    
+    intersected_cpg=db.genes[db.genes$UCSC_RefGene_Name%in%intersected_genes,1]$Name
+    
+    df2 <- cis.bval.mat[intersected_cpg, ]
+    matched_samples_ =intersect(colnames(df1),colnames(df2))
+    df2=df2[,matched_samples_]
+    CPG=as.data.frame(t(df2))
+    CPG=CPG%>%tibble::rownames_to_column("id")
+    CPG=melt( CPG)
+    
+corRes = data.frame(probe=character(0),gene=character(0), pval=numeric(0), cor=numeric(0))
+
+for(p in 1:nrow(df2)){ # DF1 contains methylation data and probes are in rows
+        pr = as.numeric(df2[p,])
+        probe = rownames(df2)[p]
+        #print(probe)
+        for(g in 1:nrow(df1)){ # DF2 contains expression data and genes are in rows
+                gene = rownames(df1)[g]
+                #print(gene)
+                ge = as.numeric(df1[g,])
+                # corelation calculation
+                res <- cor.test(pr,ge, method = "spearman")
+                # saving pvalue
+                pval = round(res$p.value, 4)
+                # corr coeff
+                cor = round(res$estimate, 4)
+                # putting data into the result dataframe
+                idx = nrow(corRes)+1
+                corRes[idx,] <- c(probe,gene, pval, cor)
+        }
+}
+    
+```
+
+```{r}
+corRes$adj.P.Val = round(p.adjust(corRes$pval, "fdr"),4)
+corRes <- corRes[order(corRes$adj.P.Val), ]
+```
+
+
+```{r pressure, echo=FALSE}
+corRes_gene=corRes[corRes$gene=="CYTH3",]
+df_CYTH3= as.data.frame(t( cis.exp.mat["CYTH3", ]))%>%tibble::rownames_to_column("id")
+
+df_cpgs=as.data.frame(t(cis.bval.mat[c("cg09159285", "cg22993195", "cg02137183", "cg14315430")	
+, ]))%>%tibble::rownames_to_column("id")
+gen.vis <- merge(df_CYTH3,df_cpgs)
+par(mfrow=c(2,2))
+sapply(names(gen.vis)[3:7], function(cpg){
+  plot(x= gen.vis[ ,cpg], y = gen.vis[,2], xlab = "beta value",
+       xlim = c(0,1),
+       ylab = "normalized expression" ,
+       pch = 19,
+       main = paste("CYTH3",cpg, sep = "-"),
+       frame = FALSE)
+  abline(lm(gen.vis[,2] ~ gen.vis[ ,cpg], data = gen.vis), col = "blue")
+})
+
+```
+#For another gene:VAMP2
+
+```{r pressure, echo=FALSE}
+corRes_gene2=corRes[corRes$gene=="VAMP2",]
+df_VAMP2= as.data.frame(t( cis.exp.mat["VAMP2", ]))%>%tibble::rownames_to_column("id")
+
+df_cpgs=as.data.frame(t(cis.bval.mat[c("cg09159285", "cg22993195", "cg07268431", "cg14315430"), ]))%>%tibble::rownames_to_column("id")		
+
+
+gen.vis <- merge(df_VAMP2,df_cpgs)
+par(mfrow=c(2,2))
+sapply(names(gen.vis)[3:7], function(cpg){
+  plot(x= gen.vis[ ,cpg], y = gen.vis[,2], xlab = "beta value",
+       xlim = c(0,1),
+       ylab = "normalized expression" ,
+       pch = 19,
+       main = paste("VAMP2",cpg, sep = "-"),
+       frame = FALSE,ylim=c(0,120))
+  abline(lm(gen.vis[,2] ~ gen.vis[ ,cpg], data = gen.vis), col = "blue")})
+
+
+```
+
+#######Trans- regulation visualization:
+
+
+
+
+```{r pressure, echo=FALSE}
+DEG_vector <-DEGS_filtered$gene_name
+```
+
+
+```{r pressure, echo=FALSE}
+DEM_vector=DMS_filtered$Gene
+```
+
+
+```{r pressure, echo=FALSE}
+DEG_DMG_inter <- intersect(DEG_vector, DEM_vector)
+```
+
+
+```{r pressure, echo=FALSE}
+#Create a top 24 gene table with all the RNA, CpG and  
+
+## A.- DEG tables
+two_inter_INFO <-DEGS_filtered[DEGS_filtered$gene_name %in% DEG_DMG_inter,] 
+dim(two_inter_INFO) 
+two_inter_INFO <- as.data.frame(two_inter_INFO)
+two_inter_INFO
+two_inter_INFO=two_inter_INFO[,-c(1:6,8:10)]
+
+two_inter_INFO <- two_inter_INFO[,c(3,1,2,4,5,6)]
+two_inter_INFO$Gene <- two_inter_INFO$gene_name
+two_inter_INFO$gene_name<- NULL
+two_inter_INFO
+```
+
+
+```{r pressure, echo=FALSE}
+## B.- DMG tables
+DMG_two_inter_INFO <- DMS_filtered[DMS_filtered$Gene %in% DEG_DMG_inter,] 
+dim(DMG_two_inter_INFO) 
+DMG_two_inter_INFO <- as.data.frame(DMG_two_inter_INFO)
+
+
+DMG_two_inter_INFO<- DMG_two_inter_INFO[,-c(1:13,15:23)]
+summary(DMG_two_inter_INFO$logFC)
+```
+```{r}
+DMG_two_inter_INFO$Gene_Group <- sapply(sapply(strsplit(DMG_two_inter_INFO$UCSC_RefGene_Name, ";"), unique), function(x)x[1])
+ 
+DMG_two_inter_INFO$UCSC_RefGene_Group<- NULL
+DMG_two_inter_INFO <- DMG_two_inter_INFO[,c(7, 1, 2,3,8,4,5,6)]
+
+```
+
+
+```{r}
+# merging
+tran.reg <- merge(two_inter_INFO,DMG_two_inter_INFO , by = "Gene")
+table_2_omics_INFO=tran.reg
+```
+
+
+```{r}
+hist(tran.reg$logFC.x,col = 'lightgreen')
+```
+
+
+
+```{r}
+# defining a column for coloring
+table_2_omics_INFO$group<- ifelse(table_2_omics_INFO$logFC.y < 0 & table_2_omics_INFO$logFC.x < 0, "hypo-down",
+                       ifelse(table_2_omics_INFO$logFC.y < 0 & table_2_omics_INFO$logFC.x >= 0, "hypo-up",
+                              ifelse(table_2_omics_INFO$logFC.y >= 0 & table_2_omics_INFO$logFC.x < 0, "hypr-down",
+                                     ifelse(table_2_omics_INFO$logFC.y >= 0 & table_2_omics_INFO$logFC.x >= 0, "hypr-up", "not-sig"))))
+
+# plotting
+cols <- c("hypo-down" = "#B8860B", "hypo-up" = "blue", "not-sig" = "grey", "hypr-down" = "red", "hypr-up" = "springgreen4")
+
+```
+
+
+```{r pressure, echo=FALSE}
+ggplot(table_2_omics_INFO, aes(x = logFC.y, y = logFC.x, color = group)) +
+  geom_point(size = 2.5, alpha = 1, na.rm = T) +
+  scale_colour_manual(values = cols) + 
+  theme_bw(base_size = 14) +
+  geom_hline(yintercept = 1.5, colour="#990000", linetype="dashed") + 
+  geom_hline(yintercept = -1.5, colour="#990000", linetype="dashed") + 
+  geom_vline(xintercept = 0.2, colour="#990000", linetype="dashed") + 
+  geom_vline(xintercept = -0.2, colour="#990000", linetype="dashed") +
+  xlab("mean methylation diffrences") + 
+  ylab("Log2 expression change")
+```
+
+
+##########Method 2 of trans-regulation:
+
+
+```{r}
+# adding genes to delta beta data 
+tran.reg1 <- data.frame(ann450k)[rownames(data.frame(ann450k)) %in% rownames(dbet), ][, c(4,24)]
+tran.reg1 <- tidyr::separate_rows(tran.reg1, Name, UCSC_RefGene_Name) # extending collapsed cells
+tran.reg1$comb <- paste(tran.reg1$Name,tran.reg$UCSC_RefGene_Name) # remove duplicates
+tran.reg1 <- tran.reg1[!duplicated(tran.reg1$comb), ]
+tran.reg1 <- tran.reg1[, -3]
+names(tran.reg1)[2] <- "gene"
+```
+
+```{r}
+# merging with deltabeta dataframe
+dbet$Name <- rownames(dbet)
+tran.reg1 <- merge(tran.reg1, dbet, by = "Name")
+# joining with differential expression analysis result
+#editing expression matrix rowname
+#df <- data.frame(name = row.names(de.genes)) # keeping rownames as a temporary data frame
+#df <- data.frame(do.call('rbind', strsplit(as.character(df$name),'|',fixed=TRUE)))
+#df$X1[df$X1 == "?"] <- df$X2 # replace "? with entrez gene number
+#rowName <- df$X1
+```
+
+
+```{r}
+df <- data.frame(name = row.names(DEGS)) # keeping rownames as a temporary data frame
+df <- data.frame(do.call('rbind', strsplit(as.character(df$name),'|',fixed=TRUE)))
+#df$X1[df$X1 == "?"] <- df$X2 # replace "? with entrez gene number
+rowName <- df$do.call..rbind...strsplit.as.character.df.name........fixed...TRUE..
+
+```
+
+
+```{r}
+# find duplicates in rowName, if any
+table(duplicated(rowName))
+ 
+```
+
+```{r}
+
+# merging
+DEGS$gene=DEGS$gene_name
+tran.reg1 <- merge(tran.reg1, DEGS, by = "gene")
+```
+
+```{r}
+hist(tran.reg1$logFC,col="lightgreen")
+```
+
+
+```{r}
+tran.reg1$delta <- tran.reg1$Cancer.grade - tran.reg1$Normal.grade
+
+```
+
+```{r}
+
+
+# defining a column for coloring
+
+tran.reg1$group<- ifelse(tran.reg1$delta <= -0.2 & tran.reg1$logFC <= 1, "hypo-down",
+                       ifelse(tran.reg1$delta <= -0.2 & tran.reg1$logFC >= 1, "hypo-up",
+                              ifelse(tran.reg1$delta >= 0.2 & tran.reg1$logFC <= 1, "hypr-down",
+                                     ifelse(tran.reg1$delta >= 0.2 & tran.reg1$logFC >= 1, "hypr-up", "not-sig"))))
+
+# plotting
+cols <- c("hypo-down" = "#B8860B", "hypo-up" = "blue", "not-sig" = "grey", "hypr-down" = "red", "hypr-up" = "springgreen4")
+
+ggplot(tran.reg1, aes(x = delta, y = logFC, color = group)) +
+  geom_point(size = 2.5, alpha = 1, na.rm = T) +
+  scale_colour_manual(values = cols) + 
+  theme_bw(base_size = 14) +
+  geom_hline(yintercept = 1, colour="#990000", linetype="dashed") + 
+  geom_hline(yintercept = -1, colour="#990000", linetype="dashed") + 
+  geom_vline(xintercept = 0.2, colour="#990000", linetype="dashed") + 
+  geom_vline(xintercept = -0.2, colour="#990000", linetype="dashed") +
+  xlab("mean methylation diffrences") + 
+  ylab("Log2 expression change")
+```
+
+
+
+
+```{r}
+
+```
+
